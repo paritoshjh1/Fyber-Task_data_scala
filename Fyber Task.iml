@@ -1,0 +1,66 @@
+import breeze.linalg._
+import breeze.stats.distributions.Gaussian
+import breeze.numerics.sqrt
+import org.apache.spark.rdd.RDD
+import org.apache.spark.{SparkConf, SparkContext}
+import main.scala.overlapping._
+import containers._
+import timeSeries._
+import scala.io.Source
+val f = Source.fromFile(data_scala.txt)
+implicit def signedDistMillis = (t1: TSInstant, t2: TSInstant) => (t2.timestamp.getMillis - t1.timestamp.getMillis).toDouble
+val fname = args(0)
+val f = scala.io.Source.fromFile(data_scala.txt)
+for (line <- f.getLines())
+  printf("%4d %s\n", line.length, line)
+f.close()
+val d = 60
+val deltaTMillis = 5 * 60L * 1000L // 5 minutes.
+val paddingMillis  = deltaTMillis * 100L // 100 step overlap.
+val nPartitions   = 8
+implicit val config = TSConfig(deltaTMillis, d, nSamples, paddingMillis.toDouble)
+println(nSamples + " samples")
+println(d + " dimensions")
+println()
+val (rawTimeSeries: RDD[(Int, SingleAxisBlock[TSInstant, DenseVector[Double]])], _) =
+    SingleAxisBlockRDD((paddingMillis, paddingMillis), nPartitions, inSampleData)
+PlotTS(rawTimeSeries, Some("In Sample Data"), Some(Array(15, 30, 45)))
+##### Grouping them in 5 minute window#####
+def hashFunction(x: TSInstant): Int = {
+    (x.timestamp.getDayOfWeek - 1) * 24 * 60 / 5 + (x.timestamp.getMinuteOfDay - 1) / 5
+}
+####visualising seasonal profile#########
+val matrixMeanProfile = DenseMatrix.zeros[Double](7 * 24 * 12, d)
+val meanProfile = MeanProfileEstimator(rawTimeSeries, hashFunction)
+for(k <- meanProfile.keys){
+    matrixMeanProfile(k, ::) := meanProfile(k).t
+}
+PlotTS.showProfile(matrixMeanProfile, Some("Weekly demand profile"), Some("Weekly_demand_profile.png"))
+##### removing seasonal component ########
+val noSeason = MeanProfileEstimator.removeSeason(inSampleData, hashFunction, meanProfile)
+val (timeSeriesRDD: RDD[(Int, SingleAxisBlock[TSInstant, DenseVector[Double]])], _) =
+SingleAxisBlockRDD((paddingMillis, paddingMillis), nPartitions, noSeason)
+###### Looking at the autocorrelation structure of the data #########
+val (correlations, _) = CrossCorrelation(timeSeriesRDD, 4)
+PlotTS.showModel(correlations, Some("Cross correlation"), Some("Correlations_data_scala.png"))
+val (partialCorrelations, _) = PartialCrossCorrelation(timeSeriesRDD,4)
+PlotTS.showModel(partialCorrelations, Some("Partial cross correlation"), Some("Partial_correlation_data_scala.png"))
+##### caliberating AR(3) model on the data, applying then univariate model ######
+val chosenP = 3
+val mean = MeanEstimator(timeSeriesRDD)
+val vectorsAR = ARModel(timeSeriesRDD, chosenP, Some(mean)).map(_.covariation)
+val residualsAR = ARPredictor(timeSeriesRDD, vectorsAR, Some(mean))
+val residualSecondMomentAR = SecondMomentEstimator(residualsAR)
+PlotTS.showUnivModel(vectorsAR, Some("Monovariate parameter estimates"), Some("Univariate_model_data_scala.png"))
+val (estVARMatrices, _) = VARModel(timeSeriesRDD, chosenP)
+PlotTS.showModel(estVARMatrices, Some("Multivariate parameter estimates"), Some("VAR_model_data_scala.png"))
+val residualSecondMomentVAR = SecondMomentEstimator(residualVAR)
+PlotTS.showCovariance(residualSecondMomentAR, Some("Monovariate residual covariance"),  Some("Monovariate_res_covariance_data_scala.png"))
+PlotTS.showCovariance(residualSecondMomentVAR, Some("Multivariate residual covariance"), Some("Multivariate_res_covariance_data_scala.png"))
+println("AR in sample error = " + trace(residualSecondMomentAR))
+println("Monovariate average error magnitude = " + sqrt(trace(residualSecondMomentAR) / d))
+println("VAR in sample error = " + trace(residualSecondMomentVAR))
+println("Multivariate average error magnitude = " + sqrt(trace(residualSecondMomentVAR) / d))
+println()
+
+
